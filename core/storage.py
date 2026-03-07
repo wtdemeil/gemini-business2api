@@ -14,7 +14,7 @@ import os
 import sqlite3
 import threading
 import time
-from typing import Optional
+from typing import Any, Optional
 
 from dotenv import load_dotenv
 
@@ -22,8 +22,10 @@ load_dotenv()
 
 logger = logging.getLogger(__name__)
 
-_db_pool = None
-_db_pool_lock = None
+# Keep a dedicated pool per event loop to avoid cross-loop Future errors.
+_db_pools: dict[int, Any] = {}
+_db_pool_locks: dict[int, asyncio.Lock] = {}
+_db_pool_registry_lock = threading.Lock()
 _db_loop = None
 _db_thread = None
 _db_loop_lock = threading.Lock()
@@ -183,45 +185,61 @@ def _get_sqlite_conn():
 
 async def _get_pool():
     """Get (or create) the asyncpg connection pool."""
-    global _db_pool, _db_pool_lock
-    if _db_pool is not None:
-        return _db_pool
-    if _db_pool_lock is None:
-        _db_pool_lock = asyncio.Lock()
-    async with _db_pool_lock:
-        if _db_pool is not None:
-            return _db_pool
+    current_loop = asyncio.get_running_loop()
+    loop_key = id(current_loop)
+
+    with _db_pool_registry_lock:
+        pool = _db_pools.get(loop_key)
+        if pool is not None:
+            return pool
+        lock = _db_pool_locks.get(loop_key)
+        if lock is None:
+            lock = asyncio.Lock()
+            _db_pool_locks[loop_key] = lock
+
+    async with lock:
+        with _db_pool_registry_lock:
+            pool = _db_pools.get(loop_key)
+            if pool is not None:
+                return pool
+
         db_url = _get_database_url()
         if not db_url:
             raise ValueError("DATABASE_URL is not set")
         try:
             import asyncpg
-            _db_pool = await asyncpg.create_pool(
+            pool = await asyncpg.create_pool(
                 db_url,
                 min_size=0,
                 max_size=10,
                 command_timeout=30,
             )
-            await _init_tables(_db_pool)
-            logger.info("[STORAGE] PostgreSQL pool initialized")
+            await _init_tables(pool)
+            with _db_pool_registry_lock:
+                _db_pools[loop_key] = pool
+            logger.info(f"[STORAGE] PostgreSQL pool initialized (loop={loop_key})")
         except ImportError:
             logger.error("[STORAGE] asyncpg is required for database storage")
             raise
         except Exception as e:
             logger.error(f"[STORAGE] Database connection failed: {e}")
             raise
-    return _db_pool
+    return pool
 
 
 async def _reset_pool():
-    """Close and recreate the connection pool (called on stale connection errors)."""
-    global _db_pool
-    if _db_pool is not None:
+    """Close and recreate current loop pool (called on stale connection errors)."""
+    loop_key = id(asyncio.get_running_loop())
+    with _db_pool_registry_lock:
+        pool = _db_pools.pop(loop_key, None)
+        _db_pool_locks.pop(loop_key, None)
+
+    if pool is not None:
         try:
-            await _db_pool.close()
+            await pool.close()
         except Exception:
             pass
-        _db_pool = None
+
     return await _get_pool()
 
 
@@ -935,7 +953,7 @@ async def load_settings() -> Optional[dict]:
         return await _load_kv("kv_settings", "settings")
     except Exception as e:
         logger.error(f"[STORAGE] Settings read failed: {e}")
-    return None
+        raise RuntimeError("Settings read failed") from e
 
 
 async def save_settings(settings: dict) -> bool:
@@ -948,7 +966,7 @@ async def save_settings(settings: dict) -> bool:
         return saved
     except Exception as e:
         logger.error(f"[STORAGE] Settings write failed: {e}")
-    return False
+        raise RuntimeError("Settings write failed") from e
 
 
 # ==================== Stats storage ====================
