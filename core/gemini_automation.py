@@ -129,11 +129,13 @@ class GeminiAutomation:
         if chromium_path:
             options.set_browser_path(chromium_path)
 
-        options.set_argument("--incognito")
+        # 不使用 --incognito：隐身模式无 cookies/历史，会大幅提高 reCAPTCHA 风控评分
         options.set_argument("--no-sandbox")
         options.set_argument("--disable-dev-shm-usage")
         options.set_argument("--disable-setuid-sandbox")
         options.set_argument("--disable-blink-features=AutomationControlled")
+        options.set_argument("--excludeSwitches=enable-automation")
+        options.set_argument("--disable-infobars")
 
         # 随机窗口尺寸（避免固定分辨率成为指纹）
         vw, vh = random.choice(COMMON_VIEWPORTS)
@@ -175,14 +177,106 @@ class GeminiAutomation:
         if self.browser_mode == BROWSER_MODE_SILENT:
             self._minimize_window(page)
 
-        # 最小化 JS 注入：只设置 window.chrome（不使用 Object.defineProperty，避免被 reCAPTCHA 检测）
-        # 注意：DrissionPage 不像 Selenium 那样暴露 navigator.webdriver，无需额外隐藏
+        # --- 反自动化检测 JS 注入（stealth） ---
         try:
             page.run_cdp("Page.addScriptToEvaluateOnNewDocument", source="""
-                // 确保 window.chrome 存在（headless 模式下可能缺失）
+                // 1. 隐藏 navigator.webdriver
+                Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+
+                // 2. 伪造 window.chrome（headless 模式下缺失）
                 if (!window.chrome) {
-                    window.chrome = {runtime: {}, loadTimes: function(){return {}}, csi: function(){return {}}};
+                    window.chrome = {};
                 }
+                if (!window.chrome.runtime) {
+                    window.chrome.runtime = {
+                        connect: function(){},
+                        sendMessage: function(){},
+                        onMessage: {addListener: function(){}, removeListener: function(){}},
+                        PlatformOs: {MAC: 'mac', WIN: 'win', ANDROID: 'android', CROS: 'cros', LINUX: 'linux', OPENBSD: 'openbsd'},
+                        PlatformArch: {ARM: 'arm', X86_32: 'x86-32', X86_64: 'x86-64', MIPS: 'mips', MIPS64: 'mips64'},
+                        RequestUpdateCheckStatus: {THROTTLED: 'throttled', NO_UPDATE: 'no_update', UPDATE_AVAILABLE: 'update_available'},
+                    };
+                }
+                if (!window.chrome.loadTimes) {
+                    window.chrome.loadTimes = function(){ return {}; };
+                }
+                if (!window.chrome.csi) {
+                    window.chrome.csi = function(){ return {}; };
+                }
+
+                // 3. 伪造 navigator.plugins（正常浏览器至少有几个插件）
+                Object.defineProperty(navigator, 'plugins', {
+                    get: () => {
+                        const plugins = [
+                            {name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer', description: 'Portable Document Format', length: 1},
+                            {name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai', description: '', length: 1},
+                            {name: 'Native Client', filename: 'internal-nacl-plugin', description: '', length: 2},
+                        ];
+                        plugins.refresh = function(){};
+                        plugins.item = function(i){ return this[i] || null; };
+                        plugins.namedItem = function(n){ return this.find(p => p.name === n) || null; };
+                        return plugins;
+                    }
+                });
+
+                // 4. 伪造 navigator.mimeTypes
+                Object.defineProperty(navigator, 'mimeTypes', {
+                    get: () => {
+                        const mimes = [
+                            {type: 'application/pdf', suffixes: 'pdf', description: 'Portable Document Format'},
+                            {type: 'application/x-google-chrome-pdf', suffixes: 'pdf', description: 'Portable Document Format'},
+                        ];
+                        mimes.item = function(i){ return this[i] || null; };
+                        mimes.namedItem = function(n){ return this.find(m => m.type === n) || null; };
+                        return mimes;
+                    }
+                });
+
+                // 5. 伪造 navigator.languages
+                Object.defineProperty(navigator, 'languages', {get: () => ['zh-CN', 'zh', 'en-US', 'en']});
+
+                // 6. 伪造 navigator.permissions.query（reCAPTCHA 会检测 notifications 权限状态）
+                const origQuery = navigator.permissions.query.bind(navigator.permissions);
+                navigator.permissions.query = function(params) {
+                    if (params.name === 'notifications') {
+                        return Promise.resolve({state: Notification.permission});
+                    }
+                    return origQuery(params);
+                };
+
+                // 7. 伪造 navigator.connection（reCAPTCHA 检测网络类型）
+                if (!navigator.connection) {
+                    Object.defineProperty(navigator, 'connection', {
+                        get: () => ({effectiveType: '4g', rtt: 50, downlink: 10, saveData: false})
+                    });
+                }
+
+                // 8. 防止 CDP 检测：移除 window.cdc_ 前缀属性（ChromeDriver 特征）
+                for (const key of Object.keys(window)) {
+                    if (/^cdc_|^__webdriver/.test(key)) {
+                        delete window[key];
+                    }
+                }
+
+                // 9. 覆盖 navigator.hardwareConcurrency（避免返回异常值）
+                Object.defineProperty(navigator, 'hardwareConcurrency', {get: () => 4});
+
+                // 10. 覆盖 navigator.deviceMemory
+                Object.defineProperty(navigator, 'deviceMemory', {get: () => 8});
+
+                // 11. 伪造 WebGL 渲染器信息（避免暴露虚拟 GPU）
+                const getParam = WebGLRenderingContext.prototype.getParameter;
+                WebGLRenderingContext.prototype.getParameter = function(param) {
+                    if (param === 37445) return 'Google Inc. (Intel)';
+                    if (param === 37446) return 'ANGLE (Intel, Intel(R) UHD Graphics 630, OpenGL 4.5)';
+                    return getParam.call(this, param);
+                };
+                const getParam2 = WebGL2RenderingContext.prototype.getParameter;
+                WebGL2RenderingContext.prototype.getParameter = function(param) {
+                    if (param === 37445) return 'Google Inc. (Intel)';
+                    if (param === 37446) return 'ANGLE (Intel, Intel(R) UHD Graphics 630, OpenGL 4.5)';
+                    return getParam2.call(this, param);
+                };
             """)
         except Exception:
             pass
@@ -238,6 +332,17 @@ class GeminiAutomation:
         from datetime import datetime
         task_start_time = datetime.now()
 
+        # Step 0: 预热浏览器 — 先访问 Google 首页建立正常 session/cookies
+        # reCAPTCHA 对"一打开就直奔 auth 页面"的行为评分极低
+        self._log("info", "🔥 预热浏览器...")
+        try:
+            page.get("https://www.google.com", timeout=self.timeout)
+            time.sleep(random.uniform(2, 4))
+            self._random_scroll(page)
+            time.sleep(random.uniform(1, 2))
+        except Exception as e:
+            self._log("warning", f"⚠️ 预热页面加载失败（不影响主流程）: {e}")
+
         # Step 1: 导航到登录页面
         self._log("info", f"🌐 打开登录页面: {email}")
         page.get(AUTH_HOME_URL, timeout=self.timeout)
@@ -278,8 +383,16 @@ class GeminiAutomation:
         page.get(login_url, timeout=self.timeout)
         time.sleep(random.uniform(3, 5))
 
-        # 模拟真实用户行为：页面加载后随机滚动
+        # 模拟真实用户行为：页面加载后随机滚动和鼠标移动
         self._random_scroll(page)
+        # 模拟鼠标在页面上随机移动（让 reCAPTCHA 收集到正常的鼠标事件）
+        try:
+            for _ in range(random.randint(2, 4)):
+                rx, ry = random.randint(100, 800), random.randint(100, 500)
+                page.actions.move(rx, ry, duration=random.uniform(0.2, 0.5))
+                time.sleep(random.uniform(0.1, 0.3))
+        except Exception:
+            pass
 
         # Step 2: 检查当前页面状态
         current_url = page.url
@@ -534,19 +647,13 @@ class GeminiAutomation:
             self._log("error", "❌ 在 signin-error 页面，无法发送验证码")
             return False
 
-        # 检查是否已经在验证码输入页面
+        # 检查是否已经在验证码输入页面（URL 提交邮箱时已自动发送验证码）
         code_input = page.ele("css:input[jsname='ovqh0b']", timeout=2) or page.ele("css:input[name='pinInput']", timeout=1)
         if code_input:
             self._stop_listen(page)
-            self._log("info", "✅ 已在验证码输入页面")
-
-            # 直接点击重新发送按钮（不管之前是否发送过）
-            if self._click_resend_code_button(page):
-                self._log("info", "✅ 已点击重新发送按钮")
-                return True
-            else:
-                self._log("warning", "⚠️ 未找到重新发送按钮，继续流程")
-                return True
+            self._log("info", "✅ 已在验证码输入页面（验证码已自动发送）")
+            self._last_send_confidence = "unknown"
+            return True
 
         self._stop_listen(page)
         self._log("error", "❌ 未找到发送验证码按钮")
@@ -791,22 +898,35 @@ class GeminiAutomation:
             return False
 
     def _human_click(self, page, element) -> None:
-        """模拟人类点击：先移动鼠标到元素附近，再点击"""
+        """模拟人类点击：先随机移动鼠标，再移到元素附近并点击"""
         try:
-            # 尝试用 actions 链模拟鼠标移动 + 点击
-            page.actions.move_to(element)
-            time.sleep(random.uniform(0.1, 0.3))
+            # 先在页面随机位置移动几次，模拟真实鼠标轨迹
+            for _ in range(random.randint(1, 3)):
+                rx, ry = random.randint(100, 800), random.randint(100, 500)
+                page.actions.move(rx, ry, duration=random.uniform(0.2, 0.5))
+                time.sleep(random.uniform(0.05, 0.15))
+            # 移到目标元素
+            page.actions.move_to(element, duration=random.uniform(0.3, 0.6))
+            time.sleep(random.uniform(0.1, 0.4))
             page.actions.click()
         except Exception:
-            # 降级为直接点击
-            element.click()
+            try:
+                element.click()
+            except Exception:
+                pass
 
     def _random_scroll(self, page) -> None:
         """模拟真实用户的页面滚动行为"""
         try:
-            scroll_amount = random.randint(50, 200)
-            page.run_js(f"window.scrollBy(0, {scroll_amount})")
-            time.sleep(random.uniform(0.3, 0.8))
+            # 多次小幅滚动，而非一次大幅滚动
+            for _ in range(random.randint(2, 4)):
+                scroll_amount = random.randint(30, 150)
+                page.run_js(f"window.scrollBy(0, {scroll_amount})")
+                time.sleep(random.uniform(0.3, 0.8))
+            # 偶尔回滚一点
+            if random.random() > 0.5:
+                page.run_js(f"window.scrollBy(0, -{random.randint(20, 80)})")
+                time.sleep(random.uniform(0.2, 0.5))
             # 有时候滚回去一点
             if random.random() < 0.3:
                 page.run_js(f"window.scrollBy(0, -{random.randint(20, 80)})")
@@ -943,6 +1063,11 @@ class GeminiAutomation:
         if "auth.business.gemini.google/login" in current_url:
             return False
 
+        # 已在工作台页面（含 cid），无需设置用户名
+        if "business.gemini.google" in current_url and "/cid/" in current_url:
+            self._log("info", "✅ 已在工作台页面，跳过用户名设置")
+            return True
+
         # 精准选择器（参考实际页面 DOM，优先级从高到低）
         selectors = [
             "css:input[formcontrolname='fullName']",
@@ -960,6 +1085,11 @@ class GeminiAutomation:
         username_input = None
         self._log("info", "⏳ 等待用户名输入框出现（最多30秒）...")
         for i in range(30):
+            # 等待期间检测是否已跳转到工作台
+            cur = page.url
+            if "business.gemini.google" in cur and "/cid/" in cur:
+                self._log("info", "✅ 页面已跳转到工作台，跳过用户名设置")
+                return True
             for selector in selectors:
                 try:
                     el = page.ele(selector, timeout=1)
