@@ -580,6 +580,12 @@ class GeminiAutomation:
     def _click_send_code_button(self, page) -> bool:
         """点击发送验证码按钮（如果需要）"""
         time.sleep(random.uniform(1.5, 3))
+
+        # 诊断：记录当前页面状态
+        self._log("info", f"🔍 [诊断] 发送验证码 - URL: {page.url}")
+        self._log("info", f"🔍 [诊断] 页面标题: {page.title}")
+        self._save_screenshot(page, "before_send_code")
+
         try:
             page.listen.start(
                 targets=["batchexecute"],
@@ -655,6 +661,27 @@ class GeminiAutomation:
             self._last_send_confidence = "unknown"
             return True
 
+        # 诊断：记录页面上所有按钮的文本
+        try:
+            all_buttons = page.eles("tag:button")
+            btn_texts = [(btn.text or "").strip()[:50] for btn in all_buttons if (btn.text or "").strip()]
+            self._log("warning", f"🔍 [诊断] 页面上的按钮: {btn_texts}")
+        except Exception as diag_e:
+            self._log("warning", f"🔍 [诊断] 无法获取按钮列表: {diag_e}")
+
+        # 诊断：保存页面 HTML 片段用于调试
+        try:
+            from core.storage import _data_file_path
+            diag_dir = _data_file_path("automation")
+            os.makedirs(diag_dir, exist_ok=True)
+            html_path = os.path.join(diag_dir, f"page_html_{int(time.time())}.html")
+            with open(html_path, "w", encoding="utf-8") as f:
+                f.write(page.html or "EMPTY")
+            self._log("info", f"🔍 [诊断] 页面 HTML 已保存到 {html_path}")
+        except Exception:
+            pass
+
+        self._save_screenshot(page, "send_code_not_found")
         self._stop_listen(page)
         self._log("error", "❌ 未找到发送验证码按钮")
         return False
