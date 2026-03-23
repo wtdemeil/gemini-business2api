@@ -9,16 +9,46 @@ services:
     env_file:
       - .env
     restart: unless-stopped
-    # 健康检查
+
+    # --- 新增配置开始 ---
+    # 增加共享内存大小，防止浏览器因内存不足崩溃 (非常关键)
+    shm_size: 1gb
+    # 赋予容器特权，解决浏览器沙盒 (Sandbox) 启动权限问题
+    privileged: true
+    # --- 新增配置结束 ---
+    # 增加依赖，确保数据库先启动并处于健康状态
+    depends_on:
+      postgres:
+        condition: service_healthy
+    # 保持你原有的健康检查
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:7860/health"]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 10s
-    # 日志限制
     logging:
       driver: json-file
       options:
         max-size: "10m"
         max-file: "3"
+
+  # 新增的 PostgreSQL 服务
+  postgres:
+    image: postgres:15-alpine # 推荐使用 alpine 版本，体积更小
+    container_name: gemini-postgres
+    restart: unless-stopped
+    # 数据库初始化配置
+    environment:
+      POSTGRES_USER: myuser        # 替换为你的用户名
+      POSTGRES_PASSWORD: mypassword # 替换为你的密码
+      POSTGRES_DB: mydb            # 替换为你的数据库名
+    volumes:
+      - ./pgdata:/var/lib/postgresql/data # 将数据库数据持久化到宿主机
+    ports:
+      - "5432:5432" # 映射到宿主机，方便你用 Navicat 等工具管理。如果不需要外网访问可删除此项
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U myuser -d mydb"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
