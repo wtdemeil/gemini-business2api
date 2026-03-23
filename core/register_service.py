@@ -35,6 +35,36 @@ class RegisterTask(BaseTask):
 class RegisterService(BaseTaskService[RegisterTask]):
     """注册服务类"""
 
+    REGISTER_RETRY_ATTEMPTS = 3
+    REGISTER_RETRYABLE_ERROR_TOKENS = (
+        "send code failed",
+        "verification code timeout",
+        "verification code timeout after resend retries",
+        "verification code submission failed",
+        "browser network error",
+        "signin-error",
+        "timed out",
+        "timeout",
+        "connection reset",
+        "connection refused",
+        "connection closed",
+        "proxy",
+        "captcha_check_failed",
+        "send_email_otp_error",
+        "url parameters not found",
+        "code input not found",
+        "code input expired",
+    )
+    REGISTER_NON_RETRYABLE_ERROR_TOKENS = (
+        "403",
+        "access restricted",
+        "未配置",
+        "配置缺失",
+        "mail password",
+        "unsupported",
+        "不支持",
+    )
+
     def __init__(
         self,
         multi_account_mgr,
@@ -147,6 +177,37 @@ class RegisterService(BaseTaskService[RegisterTask]):
 
     def _register_one(self, domain: Optional[str], mail_provider: Optional[str], task: RegisterTask) -> dict:
         """注册单个账户"""
+        log_cb = lambda level, message: self._append_log(task, level, message)
+
+        last_result = {"success": False, "error": "register failed"}
+        for attempt in range(1, self.REGISTER_RETRY_ATTEMPTS + 1):
+            if attempt > 1:
+                log_cb("warning", f"🔁 使用新邮箱重试注册 ({attempt}/{self.REGISTER_RETRY_ATTEMPTS}) ...")
+                time.sleep(3)
+
+            result = self._register_one_attempt(domain, mail_provider, task)
+            if result.get("success"):
+                return result
+
+            last_result = result
+            error = result.get("error", "")
+            if attempt >= self.REGISTER_RETRY_ATTEMPTS or not self._is_retryable_register_error(error):
+                return result
+
+            log_cb("warning", f"⚠️ 当前邮箱注册流程失败，但属于可恢复错误，准备更换新邮箱后重试: {error}")
+
+        return last_result
+
+    def _is_retryable_register_error(self, error: Optional[str]) -> bool:
+        text = str(error or "").strip().lower()
+        if not text:
+            return False
+        if any(token in text for token in self.REGISTER_NON_RETRYABLE_ERROR_TOKENS):
+            return False
+        return any(token in text for token in self.REGISTER_RETRYABLE_ERROR_TOKENS)
+
+    def _register_one_attempt(self, domain: Optional[str], mail_provider: Optional[str], task: RegisterTask) -> dict:
+        """Run one end-to-end registration attempt with a freshly created temp mailbox."""
         log_cb = lambda level, message: self._append_log(task, level, message)
 
         log_cb("info", "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")

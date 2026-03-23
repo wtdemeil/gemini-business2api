@@ -65,6 +65,28 @@ def _normalize_browser_mode(mode: str, default: str = BROWSER_MODE_NORMAL) -> st
 class GeminiAutomation:
     """Gemini自动化登录"""
 
+    BROWSER_ERROR_CODES = (
+        "ERR_TIMED_OUT",
+        "ERR_CONNECTION_TIMED_OUT",
+        "ERR_CONNECTION_RESET",
+        "ERR_CONNECTION_CLOSED",
+        "ERR_CONNECTION_REFUSED",
+        "ERR_PROXY_CONNECTION_FAILED",
+        "ERR_TUNNEL_CONNECTION_FAILED",
+        "ERR_NAME_NOT_RESOLVED",
+        "ERR_NETWORK_CHANGED",
+        "ERR_INTERNET_DISCONNECTED",
+        "ERR_SSL_PROTOCOL_ERROR",
+    )
+
+    BROWSER_ERROR_MARKERS = (
+        "无法访问此网站",
+        "This site can't be reached",
+        "This webpage is not available",
+        "检查代理服务器和防火墙",
+        "运行 Windows 网络诊断",
+    )
+
     def __init__(
         self,
         user_agent: str = "",
@@ -347,6 +369,9 @@ class GeminiAutomation:
         self._log("info", f"🌐 打开登录页面: {email}")
         page.get(AUTH_HOME_URL, timeout=self.timeout)
         time.sleep(random.uniform(2, 4))
+        page_error = self._check_browser_network_error(page, "open auth page")
+        if page_error:
+            return page_error
 
         # 从页面动态提取 XSRF token（避免硬编码被 Google 标黑）
         xsrf_token = self._extract_xsrf_token(page)
@@ -382,6 +407,9 @@ class GeminiAutomation:
         self._log("info", "📧 使用 URL 方式提交邮箱...")
         page.get(login_url, timeout=self.timeout)
         time.sleep(random.uniform(3, 5))
+        page_error = self._check_browser_network_error(page, "submit email")
+        if page_error:
+            return page_error
 
         # 模拟真实用户行为：页面加载后随机滚动和鼠标移动
         self._random_scroll(page)
@@ -414,6 +442,10 @@ class GeminiAutomation:
         access_error = self._check_access_restricted(page, email)
         if access_error:
             return access_error
+
+        page_error = self._check_browser_network_error(page, "send verification code")
+        if page_error:
+            return page_error
 
         # Step 3: 点击发送验证码按钮（最多5轮，适度退避间隔）
         self._log("info", "📧 发送验证码...")
@@ -513,8 +545,13 @@ class GeminiAutomation:
                 return access_error
             self._log("info", "📝 [注册] 验证码已提交，等待姓名输入页面...")
             if self._handle_username_setup(page, is_new_account=True):
-                self._log("info", "✅ 姓名填写完成，等待工作台 URL...")
-                if self._wait_for_business_params(page, timeout=45):
+                current_url = page.url
+                self._log("info", f"✅ 姓名填写完成，当前 URL: {current_url}")
+                if self._is_workspace_url(current_url):
+                    self._log("info", "🎊 注册成功，提取配置...")
+                    return self._extract_config(page, email)
+                self._log("info", "⏳ 姓名提交完成，继续等待工作台参数...")
+                if self._wait_for_business_params(page, timeout=20):
                     self._log("info", "🎊 注册成功，提取配置...")
                     return self._extract_config(page, email)
             # 姓名步骤失败或未出现，继续走通用流程兜底
@@ -553,6 +590,9 @@ class GeminiAutomation:
         if "business.gemini.google" not in current_url:
             page.get("https://business.gemini.google/", timeout=self.timeout)
             time.sleep(random.uniform(4, 7))
+            page_error = self._check_browser_network_error(page, "open business home")
+            if page_error:
+                return page_error
 
         # Step 11: 检查是否需要设置用户名（仅登录刷新走此路径，注册已在早期处理）
         if not is_new_account and "cid" not in page.url:
@@ -568,6 +608,9 @@ class GeminiAutomation:
         if not self._wait_for_business_params(page):
             page.refresh()
             time.sleep(random.uniform(4, 7))
+            page_error = self._check_browser_network_error(page, "refresh business page")
+            if page_error:
+                return page_error
             if not self._wait_for_business_params(page):
                 self._log("error", "❌ URL 参数生成失败")
                 self._save_screenshot(page, "params_missing")
@@ -657,7 +700,7 @@ class GeminiAutomation:
         code_input = page.ele("css:input[jsname='ovqh0b']", timeout=2) or page.ele("css:input[name='pinInput']", timeout=1)
         if code_input:
             self._stop_listen(page)
-            self._log("info", "✅ 已在验证码输入页面（验证码已自动发送）")
+            self._log("warning", "⚠️ 已在验证码输入页面，但尚未拿到发送成功证据，先按自动发送处理，若收不到码再执行重发")
             self._last_send_confidence = "unknown"
             return True
 
@@ -685,6 +728,49 @@ class GeminiAutomation:
         self._stop_listen(page)
         self._log("error", "❌ 未找到发送验证码按钮")
         return False
+
+    def _check_browser_network_error(self, page, stage: str) -> Optional[dict]:
+        """Detect Chrome error pages and return a specific error result."""
+        try:
+            page_url = str(getattr(page, "url", "") or "")
+            page_title = str(getattr(page, "title", "") or "")
+            page_html = page.html or ""
+            body_text = ""
+
+            try:
+                body = page.ele("tag:body", timeout=1)
+                body_text = (body.text or "").strip()
+            except Exception:
+                pass
+
+            combined = "\n".join(
+                [
+                    page_url,
+                    page_title,
+                    body_text[:2000],
+                    page_html[:12000],
+                ]
+            )
+            error_code = next((code for code in self.BROWSER_ERROR_CODES if code in combined), "")
+            marker_hit = any(marker in combined for marker in self.BROWSER_ERROR_MARKERS)
+            if not error_code and not marker_hit and not page_url.startswith("chrome-error://"):
+                return None
+
+            if not error_code:
+                match = re.search(r"ERR_[A-Z0-9_]+", combined)
+                error_code = match.group(0) if match else "ERR_UNKNOWN"
+
+            self._log("error", f"❌ 浏览器网络错误 ({stage}): {error_code}")
+            html_path = self._save_page_html(page, "browser_network_error")
+            self._save_screenshot(page, "browser_network_error")
+            if html_path:
+                self._log("warning", f"⚠️ 已保存网络错误页面 HTML: {html_path}")
+            return {
+                "success": False,
+                "error": f"browser network error ({error_code}) during {stage}",
+            }
+        except Exception:
+            return None
 
     def _stop_listen(self, page) -> None:
         """安全地停止网络监听"""
@@ -1066,22 +1152,45 @@ class GeminiAutomation:
                 self._human_click(page, agree_btn)
                 time.sleep(random.uniform(2, 4))
 
+    def _is_workspace_url(self, url: str) -> bool:
+        return "business.gemini.google" in (url or "") and "/cid/" in (url or "")
+
     def _wait_for_cid(self, page, timeout: int = 10) -> bool:
         """等待URL包含cid"""
-        for _ in range(timeout):
-            if "cid" in page.url:
+        for i in range(timeout):
+            try:
+                current_url = page.url
+            except Exception as exc:
+                self._log("warning", f"⚠️ 读取工作台 URL 失败: {exc}")
+                return False
+            if self._is_workspace_url(current_url):
+                self._log("info", f"✅ 检测到工作台 URL: {current_url}")
                 return True
+            if i > 0 and (i + 1) % 10 == 0:
+                self._log("info", f"⏳ 仍在等待工作台 URL... ({i + 1}/{timeout}s)")
             time.sleep(1)
         return False
 
     def _wait_for_business_params(self, page, timeout: int = 30) -> bool:
         """等待业务页面参数生成（csesidx 和 cid）"""
-        for _ in range(timeout):
-            url = page.url
-            if "csesidx=" in url and "/cid/" in url:
+        saw_workspace = False
+        for i in range(timeout):
+            try:
+                url = page.url
+            except Exception as exc:
+                self._log("warning", f"⚠️ 读取业务页面 URL 失败: {exc}")
+                return False
+            if "csesidx=" in url and self._is_workspace_url(url):
+                self._log("info", f"✅ 检测到完整工作台参数: {url}")
                 return True
+            if self._is_workspace_url(url):
+                if not saw_workspace:
+                    self._log("info", "✅ 已进入工作台页面，继续等待 csesidx 参数...")
+                    saw_workspace = True
+                elif i > 0 and (i + 1) % 5 == 0:
+                    self._log("info", f"⏳ 工作台已打开，继续等待 csesidx... ({i + 1}/{timeout}s)")
             time.sleep(1)
-        return False
+        return saw_workspace
 
     def _handle_username_setup(self, page, is_new_account: bool = False) -> bool:
         """处理用户名设置页面（is_new_account=True 时启用按钮兜底和延长超时）"""
@@ -1200,6 +1309,15 @@ class GeminiAutomation:
             url = page.url
             if "cid/" not in url:
                 return {"success": False, "error": "cid not found"}
+
+            if "csesidx=" not in url:
+                self._log("info", "⏳ 已进入工作台，但 csesidx 尚未出现在 URL 中，等待最多 8 秒...")
+                for _ in range(8):
+                    time.sleep(1)
+                    url = page.url
+                    if "csesidx=" in url:
+                        self._log("info", f"✅ 已补全 csesidx 参数: {url}")
+                        break
 
             config_id = url.split("cid/")[1].split("?")[0].split("/")[0]
             csesidx = url.split("csesidx=")[1].split("&")[0] if "csesidx=" in url else ""
@@ -1337,6 +1455,20 @@ class GeminiAutomation:
             page.get_screenshot(path=path)
         except Exception:
             pass
+
+    def _save_page_html(self, page, name: str) -> Optional[str]:
+        """保存当前页面 HTML，便于排查自动化失败。"""
+        try:
+            from core.storage import _data_file_path
+
+            screenshot_dir = _data_file_path("automation")
+            os.makedirs(screenshot_dir, exist_ok=True)
+            path = os.path.join(screenshot_dir, f"{name}_{int(time.time())}.html")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(page.html or "")
+            return path
+        except Exception:
+            return None
 
     def _log(self, level: str, message: str) -> None:
         """记录日志"""
