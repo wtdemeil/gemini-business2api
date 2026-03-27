@@ -174,6 +174,24 @@
             >
               刷新选中
             </button>
+            <button
+              type="button"
+              class="flex w-full items-center justify-between rounded-xl px-3 py-2.5 text-left text-sm transition-colors"
+              :class="!selectedCount || isOperating
+                ? 'cursor-not-allowed text-muted-foreground'
+                : 'text-foreground hover:bg-accent'"
+              :disabled="!selectedCount || isOperating"
+              @click="handleBulkSync(); closeMoreActions()"
+            >
+              <span v-if="isOperating" class="flex items-center gap-2">
+                <svg class="h-4 w-4 animate-spin" viewBox="0 0 24 24" fill="none">
+                  <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                  <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                </svg>
+                同步中...
+              </span>
+              <span v-else>同步选中</span>
+            </button>
             <div class="my-1 border-t border-border/60"></div>
             <button
               type="button"
@@ -328,6 +346,14 @@
               禁用
             </button>
             <button
+              class="rounded-full border border-border px-3 py-1 text-xs text-foreground transition-colors
+                     hover:border-primary hover:text-primary"
+              @click.stop
+              @click="handleSync(account.id)"
+            >
+              同步
+            </button>
+            <button
               class="rounded-full border border-border px-3 py-1 text-xs text-destructive transition-colors
                      hover:border-destructive hover:text-destructive"
               @click.stop
@@ -447,6 +473,13 @@
                     @click.stop="handleDisable(account.id)"
                   >
                     禁用
+                  </button>
+                  <button
+                    class="rounded-full border border-border px-3 py-1 text-xs text-foreground transition-colors
+                           hover:border-primary hover:text-primary"
+                    @click.stop="handleSync(account.id)"
+                  >
+                    同步
                   </button>
                   <button
                     class="rounded-full border border-border px-3 py-1 text-xs text-destructive transition-colors
@@ -2816,6 +2849,28 @@ const handleDelete = async (accountId: string) => {
     handleOpResult(result, '账号已删除', '删除失败')
   } catch (error: any) {
     toast.error(error.message || '删除失败')
+  }
+}
+
+const handleSync = async (accountId: string) => {
+  if (isOperating.value) return
+  try {
+    const result = await accountsStore.syncAccounts([accountId])
+    handleOpResult(result, '同步成功', '同步失败')
+  } catch (error: any) {
+    toast.error(error.message || '同步失败')
+  }
+}
+
+const handleBulkSync = async () => {
+  if (isOperating.value) return
+  try {
+    const result = await accountsStore.syncAccounts(Array.from(selectedIds.value))
+    if (handleOpResult(result, '批量同步成功', '批量同步失败')) {
+      selectedIds.value = new Set()
+    }
+  } catch (error: any) {
+    toast.error(error.message || '批量同步失败')
   }
 }
 

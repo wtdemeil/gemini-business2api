@@ -113,6 +113,8 @@ export interface Settings {
     register_default_count?: number
     register_domain?: string
     image_expire_hours?: number
+    sync_server_url?: string
+    sync_server_key?: string
   }
   retry: {
     max_account_switch_tries: number

@@ -68,6 +68,29 @@
             </div>
 
             <div class="rounded-2xl border border-border bg-card p-4">
+              <p class="text-xs uppercase tracking-[0.3em] text-muted-foreground">TOKEN 同步</p>
+              <div class="mt-4 space-y-3">
+                <div class="flex items-center justify-between gap-2 text-xs text-muted-foreground">
+                  <span>远程服务器 URL</span>
+                  <HelpTip text="刷新token后自动同步到远程服务器，留空则不同步。例如: https://your-server.com" />
+                </div>
+                <input
+                  v-model="localSettings.basic.sync_server_url"
+                  type="text"
+                  class="w-full rounded-2xl border border-input bg-background px-3 py-2 text-sm"
+                  placeholder="https://your-server.com"
+                />
+                <label class="block text-xs text-muted-foreground">远程服务器 ADMIN_KEY</label>
+                <input
+                  v-model="localSettings.basic.sync_server_key"
+                  type="password"
+                  class="w-full rounded-2xl border border-input bg-background px-3 py-2 text-sm"
+                  placeholder="远程服务器的管理员密钥"
+                />
+              </div>
+            </div>
+
+            <div class="rounded-2xl border border-border bg-card p-4">
               <p class="text-xs uppercase tracking-[0.3em] text-muted-foreground">重试</p>
               <div class="mt-4 grid grid-cols-2 gap-3 text-sm">
                 <label class="col-span-2 text-xs text-muted-foreground">账户切换次数</label>
@@ -564,6 +587,12 @@ watch(settings, (value) => {
   next.basic.cfmail_verify_ssl = next.basic.cfmail_verify_ssl ?? true
   next.basic.cfmail_domain = typeof next.basic.cfmail_domain === 'string'
     ? next.basic.cfmail_domain
+    : ''
+  next.basic.sync_server_url = typeof next.basic.sync_server_url === 'string'
+    ? next.basic.sync_server_url
+    : ''
+  next.basic.sync_server_key = typeof next.basic.sync_server_key === 'string'
+    ? next.basic.sync_server_key
     : ''
   next.retry = next.retry || {}
   next.retry.auto_refresh_accounts_seconds = Number.isFinite(next.retry.auto_refresh_accounts_seconds)

@@ -6,6 +6,10 @@ services:
       - "7860:7860"
     volumes:
       - ./data:/app/data
+      - ./main.py:/app/main.py:ro
+      - ./core/config.py:/app/core/config.py:ro
+      - ./core/sync_service.py:/app/core/sync_service.py:ro
+      - ./core/login_service.py:/app/core/login_service.py:ro
     env_file:
       - .env
     restart: unless-stopped

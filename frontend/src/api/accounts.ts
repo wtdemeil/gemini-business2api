@@ -90,4 +90,11 @@ export const accountsApi = {
   // 获取自动刷新状态
   getAutoRefreshStatus: () =>
     apiClient.get<never, { paused: boolean; status: string }>('/admin/auto-refresh/status'),
+
+  // 同步账号到远程服务器
+  syncAccounts: (accountIds: string[]) =>
+    apiClient.post<never, { status: string; success_count: number; total: number; errors: string[] }>(
+      '/admin/accounts/sync',
+      accountIds
+    ),
 }

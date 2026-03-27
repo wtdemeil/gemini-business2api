@@ -162,6 +162,15 @@ export const useAccountsStore = defineStore('accounts', () => {
     })
   }
 
+  async function syncAccounts(accountIds: string[]) {
+    if (!accountIds.length) return { ok: true, errors: [] }
+    return runAccountOp({
+      accountIds,
+      refreshAfter: false,
+      request: async (chunk) => accountsApi.syncAccounts(chunk),
+    })
+  }
+
   async function updateConfig(newAccounts: AccountConfigItem[]) {
     return runAccountOp({
       lockKeys: ['__config_update__'],
@@ -184,5 +193,6 @@ export const useAccountsStore = defineStore('accounts', () => {
     bulkDisable,
     bulkDelete,
     updateConfig,
+    syncAccounts,
   }
 })

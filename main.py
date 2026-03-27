@@ -1452,6 +1452,69 @@ async def admin_update_config(request: Request, accounts_data: list = Body(...))
         logger.error(f"[CONFIG] 更新配置失败: {str(e)}")
         raise HTTPException(500, f"更新失败: {str(e)}")
 
+@app.post("/api/sync-account")
+async def api_sync_account(
+    payload: dict = Body(...),
+    authorization: Optional[str] = Header(None),
+):
+    """接收远程同步的账户 token 更新（存在则更新，不存在则新增）"""
+    verify_api_key(ADMIN_KEY, authorization)
+
+    account_id = payload.get("account_id")
+    if not account_id:
+        raise HTTPException(400, "account_id is required")
+
+    # 全量同步字段（手动同步时会携带所有字段）
+    all_sync_fields = [
+        "secure_c_ses", "host_c_oses", "csesidx", "config_id", "expires_at",
+        "disabled", "mail_provider", "mail_address", "mail_password",
+        "mail_client_id", "mail_refresh_token", "mail_tenant",
+        "mail_base_url", "mail_jwt_token", "mail_verify_ssl",
+        "mail_domain", "mail_api_key", "trial_end",
+    ]
+
+    accounts = load_accounts_from_source()
+    found = False
+    for acc in accounts:
+        if acc.get("id") == account_id:
+            for field in all_sync_fields:
+                if field in payload:
+                    acc[field] = payload[field]
+            found = True
+            break
+
+    action = "updated"
+    if not found:
+        new_acc = {"id": account_id}
+        for field in all_sync_fields:
+            if field in payload:
+                new_acc[field] = payload[field]
+        accounts.append(new_acc)
+        action = "created"
+
+    global multi_account_mgr
+    multi_account_mgr = _update_accounts_config(
+        accounts, multi_account_mgr, http_client, USER_AGENT,
+        RETRY_POLICY, SESSION_CACHE_TTL_SECONDS, global_stats
+    )
+
+    logger.info(f"[SYNC] 远程同步 {action}: {account_id}")
+    return {"status": "success", "account_id": account_id, "action": action}
+
+@app.post("/admin/accounts/sync")
+@require_login()
+async def admin_sync_accounts(request: Request, account_ids: list = Body(...)):
+    """手动同步账号到远程服务器（支持单个和批量）"""
+    from core.sync_service import sync_accounts_to_server
+    results = await sync_accounts_to_server(account_ids)
+    errors = [r["error"] for r in results if not r["success"]]
+    return {
+        "status": "success" if not errors else "partial",
+        "success_count": sum(1 for r in results if r["success"]),
+        "total": len(results),
+        "errors": errors,
+    }
+
 @app.post("/admin/register/start")
 @require_login()
 async def admin_start_register(request: Request, count: Optional[int] = Body(default=None), domain: Optional[str] = Body(default=None), mail_provider: Optional[str] = Body(default=None)):
@@ -1695,6 +1758,8 @@ async def admin_get_settings(request: Request):
             "register_default_count": config.basic.register_default_count,
             "register_domain": config.basic.register_domain,
             "image_expire_hours": config.basic.image_expire_hours,
+            "sync_server_url": config.basic.sync_server_url,
+            "sync_server_key": config.basic.sync_server_key,
         },
         "image_generation": {
             "enabled": config.image_generation.enabled,

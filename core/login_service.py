@@ -152,6 +152,15 @@ class LoginService(BaseTaskService[LoginTask]):
                 self._append_log(task, "info", "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
                 self._append_log(task, "info", f"🎉 刷新成功: {account_id}")
                 self._append_log(task, "info", "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+
+                # 同步到远程服务器
+                try:
+                    from core.sync_service import sync_account_to_server
+                    synced = await sync_account_to_server(account_id, result.get("config", {}))
+                    if synced:
+                        self._append_log(task, "info", f"☁️ 已同步到远程服务器: {account_id}")
+                except Exception as sync_exc:
+                    self._append_log(task, "warning", f"⚠️ 同步到远程服务器失败: {sync_exc}")
             else:
                 task.fail_count += 1
                 error = result.get('error', '未知错误')
